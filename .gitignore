@@ -44,3 +44,11 @@ arms/Hero/ov_models
 gyro.txt
 Doxyfile
 docs/*
+!docs/common/
+!docs/common/**/*.md
+!docs/modules/
+!docs/modules/**/*.md
+!docs/projects/
+!docs/projects/**/*.md
+!docs/codex/
+!docs/codex/**/*.md
