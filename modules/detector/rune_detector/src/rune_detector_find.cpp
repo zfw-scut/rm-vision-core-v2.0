@@ -25,6 +25,91 @@ inline Point2f getDirection(const FeatureNode_cptr &feature)
 }
 
 /**
+ * @brief 记录特征查找阶段失败原因
+ *
+ * @param[in,out] diagnostics 诊断信息，可为空
+ * @param[in] reason 失败原因
+ */
+inline void setFindFeaturesFailure(RuneDetectorFrameDiagnostics *diagnostics, const std::string &reason)
+{
+    if (!diagnostics)
+        return;
+
+    // 失败原因用于后续筛选低置信帧，保持字符串稳定。
+    diagnostics->find_features_failure = reason;
+}
+
+/**
+ * @brief 将已激活扇叶转换为诊断样本
+ *
+ * @param[in,out] diagnostics 诊断信息，可为空
+ * @param[in] fan 神符扇叶特征
+ */
+inline void appendActiveFanSample(RuneDetectorFrameDiagnostics *diagnostics, const FeatureNode_cptr &fan)
+{
+    if (!diagnostics || !fan)
+        return;
+
+    auto rune_fan = RuneFan::cast(fan);
+    if (!rune_fan || !rune_fan->getActiveFlag())
+        return;
+
+    RuneDetectorFrameDiagnostics::ActiveFanSample sample;
+    const auto &image_cache = rune_fan->getImageCache();
+
+    // 保存图像缓存中的基本几何信息。
+    if (image_cache.isSetCenter())
+        sample.center = image_cache.getCenter();
+    if (image_cache.isSetDirection())
+        sample.direction = image_cache.getDirection();
+    if (image_cache.isSetWidth())
+        sample.width = image_cache.getWidth();
+    if (image_cache.isSetHeight())
+        sample.height = image_cache.getHeight();
+    if (image_cache.isSetCorners())
+        sample.corners = image_cache.getCorners();
+
+    // 保存原始轮廓点集，作为后续角点网络的主输入候选。
+    if (image_cache.isSetContours())
+    {
+        for (const auto &contour : image_cache.getContours())
+        {
+            if (!contour)
+                continue;
+            sample.contour_points.emplace_back(contour->points().begin(), contour->points().end());
+        }
+    }
+
+    // 保存当前 PnP 实际使用的点序列，用于对照角点弱标签。
+    auto [points_2d, points_3d, weights] = rune_fan->getPnpPoints();
+    (void)points_3d;
+    (void)weights;
+    sample.pnp_points = std::move(points_2d);
+
+    diagnostics->active_fans.emplace_back(std::move(sample));
+}
+
+/**
+ * @brief 汇总匹配后的已激活扇叶诊断样本
+ *
+ * @param[in,out] diagnostics 诊断信息，可为空
+ * @param[in] matched_features 已匹配特征组
+ */
+inline void appendMatchedActiveFanSamples(RuneDetectorFrameDiagnostics *diagnostics, const std::vector<RuneFeatureCombo> &matched_features)
+{
+    if (!diagnostics)
+        return;
+
+    diagnostics->active_fans.clear();
+    for (const auto &[target, center, fan] : matched_features)
+    {
+        (void)target;
+        (void)center;
+        appendActiveFanSample(diagnostics, fan);
+    }
+}
+
+/**
  * @brief 判断是否存在匹配异常
  *
  * @param runes 神符组
@@ -212,13 +297,15 @@ void RuneDetector::extractRuneFeatures(vector<FeatureNode_ptr> &targets_inactive
     }
 }
 
-bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std::vector<RuneFeatureCombo> &matched_features)
+bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std::vector<RuneFeatureCombo> &matched_features, RuneDetectorFrameDiagnostics *diagnostics)
 {
 
     vector<Contour_cptr> contours{};
     vector<Vec4i> hierarchy; // 轮廓等级向量
     // 神符轮廓识别
     findContours(src, contours, hierarchy, RETR_TREE, CHAIN_APPROX_NONE);
+    if (diagnostics)
+        diagnostics->candidate_counts.contours_raw = static_cast<int>(contours.size());
     // vector<Contour_ptr> contours(contours_temp.begin(), contours_temp.end()); // 轮廓二维向量
     for (size_t i = 0; i < contours.size(); i++) // 删除面积过小的轮廓
     {
@@ -229,8 +316,11 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
             i--;
         }
     }
+    if (diagnostics)
+        diagnostics->candidate_counts.contours_filtered = static_cast<int>(contours.size());
     if (contours.empty() || hierarchy.empty())
     {
+        setFindFeaturesFailure(diagnostics, "empty_contours_after_area_filter");
         return false;
     }
     vector<FeatureNode_ptr> targets_active;   // 神符已激活靶心向量
@@ -241,9 +331,20 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
     unordered_set<size_t> continue_idx{}; // 不进行识别的轮廓下标集合
 
     extractRuneFeatures(targets_inactive, targets_active, fans_inactive, fans_active, centers, contours, hierarchy, continue_idx);
+    if (diagnostics)
+    {
+        diagnostics->candidate_counts.targets_active = static_cast<int>(targets_active.size());
+        diagnostics->candidate_counts.targets_inactive = static_cast<int>(targets_inactive.size());
+        diagnostics->candidate_counts.fans_active = static_cast<int>(fans_active.size());
+        diagnostics->candidate_counts.fans_inactive = static_cast<int>(fans_inactive.size());
+        diagnostics->candidate_counts.centers = static_cast<int>(centers.size());
+    }
 
     if (targets_inactive.empty() && targets_active.empty() && fans_inactive.empty() && fans_active.empty()) // 神符特征为空、放弃构建
+    {
+        setFindFeaturesFailure(diagnostics, "empty_rune_features");
         return false;
+    }
     // 判断是否需要强制构造神符中心
     bool is_force_make_center = [&]() -> bool
     {
@@ -287,13 +388,17 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
             break;
         }
 
+        setFindFeaturesFailure(diagnostics, "failed_force_make_center");
         return false; // 无法构造神符中心、放弃构建
     } while (0);
 
     if (centers.empty())
     {
+        setFindFeaturesFailure(diagnostics, "empty_centers");
         return false; // 神符中心为空、放弃构建
     }
+    if (diagnostics)
+        diagnostics->candidate_counts.centers = static_cast<int>(centers.size());
 
     FeatureNode_ptr rune_center = centers[0];                                               // 神符中心
     FeatureNode_ptr rune_inactive_fan = fans_inactive.empty() ? nullptr : fans_inactive[0]; // 未激活扇叶
@@ -331,11 +436,14 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
     unordered_map<FeatureNode_cptr, unordered_set<size_t>> fans_active_incomplete_idxs{};
     RuneFan::find_incomplete_active_fans(fans_active_incomplete, contours, hierarchy, continue_idx, rotate_center, fans_active_incomplete_idxs); // 未完整的已激活扇叶
     filterActiveFanIncomplete(fans_active_incomplete, targets_inactive, targets_active, fans_inactive, fans_active, rune_center);                // 筛选未完整的已激活扇叶
+    if (diagnostics)
+        diagnostics->candidate_counts.fans_active_incomplete = static_cast<int>(fans_active_incomplete.size());
     rune_fans.insert(rune_fans.end(), fans_active_incomplete.begin(), fans_active_incomplete.end());
 
     auto temp_matched_features = getMatchedFeature(rune_targets, rune_center, rune_fans); // 获取配对后的特征组
     if (isMatchError(temp_matched_features))                                              // 匹配异常
     {
+        setFindFeaturesFailure(diagnostics, "matched_feature_error");
         return false;
     } 
 
@@ -363,6 +471,9 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
 #endif
 
     matched_features = temp_matched_features;
+    if (diagnostics)
+        diagnostics->candidate_counts.matched_feature_groups = static_cast<int>(matched_features.size());
+    appendMatchedActiveFanSamples(diagnostics, matched_features);
     // 存入 features
     for (auto [target, center, fan] : temp_matched_features)
     {
@@ -373,5 +484,7 @@ bool RuneDetector::findFeatures(Mat src, vector<FeatureNode_cptr> &features, std
         if (fan != nullptr)
             features.emplace_back(fan);
     }
+    if (diagnostics)
+        diagnostics->candidate_counts.final_feature_nodes = static_cast<int>(features.size());
     return true;
 }

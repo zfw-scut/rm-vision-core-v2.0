@@ -46,6 +46,8 @@ struct RuneDetectorParam
     double CENTER_FORCE_CONSTRUCT_WINDOW_RATIO = 0.2;
     //! 是否启用神符中心强制构造窗口
     bool ENABLE_CENTER_FORCE_CONSTRUCT_WINDOW = true;
+    //! 是否显示二值图调试窗口
+    bool ENABLE_BINARY_DEBUG_VIEW = true;
 
     YML_INIT(
         RuneDetectorParam,
@@ -66,7 +68,8 @@ struct RuneDetectorParam
         YML_ADD_PARAM(MAX_MATCH_DEVIATION_RATIO);
         YML_ADD_PARAM(ESTIMATE_CENTER_VALID_TIME);
         YML_ADD_PARAM(CENTER_FORCE_CONSTRUCT_WINDOW_RATIO);
-        YML_ADD_PARAM(ENABLE_CENTER_FORCE_CONSTRUCT_WINDOW);)
+        YML_ADD_PARAM(ENABLE_CENTER_FORCE_CONSTRUCT_WINDOW);
+        YML_ADD_PARAM(ENABLE_BINARY_DEBUG_VIEW);)
 };
 
 //! RuneDetectorParam 参数模块

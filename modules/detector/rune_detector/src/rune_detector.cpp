@@ -8,6 +8,18 @@ using namespace std;
 using namespace cv;
 
 /**
+ * @brief 计算 OpenCV tick 之间的毫秒差
+ *
+ * @param[in] start_tick 起始 tick
+ * @param[in] end_tick 结束 tick
+ * @return 毫秒耗时
+ */
+static inline double elapsedMs(int64_t start_tick, int64_t end_tick = cv::getTickCount())
+{
+    return (static_cast<double>(end_tick - start_tick) * 1000.0) / cv::getTickFrequency();
+}
+
+/**
  * @brief 更新特征组
  *
  * @param[in] matched_features 匹配好的特征
@@ -44,6 +56,11 @@ inline static void setBaseProperties(std::vector<FeatureNode_ptr> &groups, const
 
 void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
 {
+    setLastDiagnostics(RuneDetectorFrameDiagnostics{});
+    auto &diagnostics = getLastDiagnostics();
+    diagnostics.status = "running";
+    const int64_t total_start_tick = cv::getTickCount();
+
     auto &groups = input.getFeatureNodes();
     auto &input_image = input.getImage();
     auto &tick = input.getTick();
@@ -70,9 +87,16 @@ void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
     // 二值化处理图像
 
     Mat bin;
+    int64_t stage_start_tick = cv::getTickCount();
     binary(input_image, bin, color, color_thresh);
-    WindowAutoLayout::get()->addWindow("Binary Image");
-    imshow("Binary Image", bin);
+    diagnostics.stage_times.binary_ms = elapsedMs(stage_start_tick);
+    diagnostics.binary_nonzero = cv::countNonZero(bin);
+    diagnostics.binary_nonzero_ratio = bin.empty() ? 0.0 : static_cast<double>(diagnostics.binary_nonzero) / static_cast<double>(bin.total());
+    if (rune_detector_param.ENABLE_BINARY_DEBUG_VIEW)
+    {
+        WindowAutoLayout::get()->addWindow("Binary Image");
+        imshow("Binary Image", bin);
+    }
 
 
     vector<RuneFeatureCombo> matched_features{}; // 匹配好的特征
@@ -82,23 +106,47 @@ void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
     {
         // 尝试获取神符中心的估计位置
         // 尝试查找所有的神符特征
-        if (!findFeatures(bin, current_features, matched_features))
+        stage_start_tick = cv::getTickCount();
+        if (!findFeatures(bin, current_features, matched_features, &diagnostics))
+        {
+            diagnostics.stage_times.find_features_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "find_features";
             return false;
+        }
+        diagnostics.stage_times.find_features_ms = elapsedMs(stage_start_tick);
 
         // cout <<"神符特征查找成功" << endl;
         // 尝试获取PNP解算数据
 
         PoseNode runeGroup_to_cam;
+        stage_start_tick = cv::getTickCount();
         if (!getPnpData(runeGroup_to_cam, rune_group, to_const(matched_features)))
+        {
+            diagnostics.stage_times.pnp_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "pnp";
             return false;
+        }
+        diagnostics.stage_times.pnp_ms = elapsedMs(stage_start_tick);
 
         // 更新序列组
+        stage_start_tick = cv::getTickCount();
         if (!rune_group->update(runeGroup_to_cam, gyro_data, tick))
+        {
+            diagnostics.stage_times.group_update_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "group_update";
             return false;
+        }
+        diagnostics.stage_times.group_update_ms = elapsedMs(stage_start_tick);
 
         // 尝试获取所有的神符组合体
+        stage_start_tick = cv::getTickCount();
         if (!getRunes(current_combos, rune_group, to_const(matched_features), rune_group->getPoseCache().getPoseNodes()[CoordFrame::CAMERA]))
+        {
+            diagnostics.stage_times.get_runes_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "get_runes";
             return false;
+        }
+        diagnostics.stage_times.get_runes_ms = elapsedMs(stage_start_tick);
 
         // 更新神符中心估计信息
 
@@ -110,19 +158,37 @@ void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
     {
         // 掉帧状态处理
         if (!rune_group->visibilityProcess(false))
+        {
+            diagnostics.failure_stage = "vanish_visibility";
             return false;
+        }
 
         PoseNode runeGroup_to_cam;
         if (!rune_group->getCamPnpDataFromPast(runeGroup_to_cam))
+        {
+            diagnostics.failure_stage = "vanish_past_pnp";
             return false;
+        }
 
         // 更新序列组
+        stage_start_tick = cv::getTickCount();
         if (!rune_group->update(runeGroup_to_cam, gyro_data, tick))
+        {
+            diagnostics.stage_times.group_update_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "vanish_group_update";
             return false;
+        }
+        diagnostics.stage_times.group_update_ms = elapsedMs(stage_start_tick);
 
         // 尝试获取所有的神符组合体
+        stage_start_tick = cv::getTickCount();
         if (!getRunes(current_combos, rune_group, rune_group->getLastFrameFeatures(), rune_group->getPoseCache().getPoseNodes()[CoordFrame::CAMERA]))
+        {
+            diagnostics.stage_times.get_runes_ms = elapsedMs(stage_start_tick);
+            diagnostics.failure_stage = "vanish_get_runes";
             return false;
+        }
+        diagnostics.stage_times.get_runes_ms = elapsedMs(stage_start_tick);
 
         // 更新特征组
         setFeatures(rune_group->getLastFrameFeatures(), current_features);
@@ -144,6 +210,10 @@ void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
             setBaseProperties(groups, gyro_data, tick);
             output.setFeatureNodes(groups);
             output.setValid(false);
+            diagnostics.status = "failed";
+            diagnostics.output_valid = false;
+            diagnostics.used_vanish_update = true;
+            diagnostics.stage_times.total_ms = elapsedMs(total_start_tick);
             return;
         }
     }
@@ -158,20 +228,31 @@ void RuneDetector::detect(DetectorInput &input, DetectorOutput &output)
 
     if (current_combos.empty())
     {
+        diagnostics.status = "failed";
+        diagnostics.failure_stage = "empty_combos";
+        diagnostics.output_valid = false;
+        diagnostics.stage_times.total_ms = elapsedMs(total_start_tick);
         VC_THROW_ERROR("组合体为空");
     }
 
     // 匹配
     auto rune_trackers = rune_group->getTrackers();
+    stage_start_tick = cv::getTickCount();
     if (!match(current_combos, rune_trackers, is_vanish_update))
     {
         rune_trackers.clear();
         match(current_combos, rune_trackers, is_vanish_update);
     }
+    diagnostics.stage_times.match_ms = elapsedMs(stage_start_tick);
     rune_group->setTrackers(rune_trackers);
 
     rune_group->sync(gyro_data, tick);
     
     output.setValid(true);
     output.setFeatureNodes(groups);
+    diagnostics.status = is_vanish_update ? "vanish_ok" : "ok";
+    diagnostics.failure_stage.clear();
+    diagnostics.output_valid = true;
+    diagnostics.used_vanish_update = is_vanish_update;
+    diagnostics.stage_times.total_ms = elapsedMs(total_start_tick);
 }

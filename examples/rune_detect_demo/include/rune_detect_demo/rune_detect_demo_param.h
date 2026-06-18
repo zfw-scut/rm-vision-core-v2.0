@@ -1,6 +1,6 @@
 #pragma once
 
-#include<string>
+#include <string>
 
 struct RuneDetectDemoParam
 {
@@ -18,5 +18,17 @@ struct RuneDetectDemoParam
     bool is_get_fps = false;
     //! 视频帧率
     double fps = 0.0;
+    //! 是否启用神符角点网络数据诊断导出
+    bool diagnostic_enabled = false;
+    //! 诊断导出根目录
+    std::string diagnostic_output_root = "rune_keypoint_nn_runs";
+    //! 诊断运行名称，为空时自动生成
+    std::string diagnostic_run_name = "";
+    //! 诊断模式下是否保存识别结果图片
+    bool diagnostic_save_images = true;
+    //! 诊断图片定期采样帧间隔
+    int diagnostic_image_stride = 200;
+    //! 单次诊断运行最多保存的图片数量
+    int diagnostic_image_max_count = 80;
 };
 extern RuneDetectDemoParam rune_detect_demo_param;

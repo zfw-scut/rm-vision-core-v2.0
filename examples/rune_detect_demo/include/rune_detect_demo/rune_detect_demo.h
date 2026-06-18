@@ -27,8 +27,20 @@
 /**
  * @brief 核心处理函数
  * @param vid_cap 视频捕获对象
+ * @return 成功读取并处理一帧返回 true，视频结束或读取失败返回 false
  */
-void process(cv::VideoCapture &vid_cap);
+bool process(cv::VideoCapture &vid_cap);
+
+/**
+ * @brief 初始化诊断导出目录和输出文件
+ * @param cap 视频捕获对象
+ */
+void initDiagnosticRun(cv::VideoCapture &cap);
+
+/**
+ * @brief 完成诊断导出并写入汇总信息
+ */
+void finishDiagnosticRun();
 
 
 /**

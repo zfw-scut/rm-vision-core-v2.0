@@ -2,9 +2,76 @@
 
 #include "vc/detector/detector.h"
 
+#include <string>
+#include <vector>
+
 //! 特征组合体
 using RuneFeatureCombo = std::tuple<FeatureNode_ptr, FeatureNode_ptr, FeatureNode_ptr>;
 using RuneFeatureComboConst = std::tuple<FeatureNode_cptr, FeatureNode_cptr, FeatureNode_cptr>;
+
+/**
+ * @brief 神符识别单帧诊断信息
+ *
+ * @note 该结构只用于离线数据集构建和调试记录，不参与主识别决策。
+ */
+struct RuneDetectorFrameDiagnostics
+{
+    /**
+     * @brief 识别阶段耗时统计
+     */
+    struct StageTimes
+    {
+        double binary_ms = 0.0;       //!< 二值化耗时
+        double find_features_ms = 0.0; //!< 特征查找耗时
+        double pnp_ms = 0.0;          //!< PnP 解算耗时
+        double group_update_ms = 0.0; //!< 神符组更新耗时
+        double get_runes_ms = 0.0;    //!< 神符组合体构造耗时
+        double match_ms = 0.0;        //!< 追踪器匹配耗时
+        double total_ms = 0.0;        //!< detector 总耗时
+    };
+
+    /**
+     * @brief 候选特征数量统计
+     */
+    struct CandidateCounts
+    {
+        int contours_raw = 0;                 //!< 初始轮廓数量
+        int contours_filtered = 0;            //!< 面积过滤后的轮廓数量
+        int targets_active = 0;               //!< 已激活靶心数量
+        int targets_inactive = 0;             //!< 未激活靶心数量
+        int fans_active = 0;                  //!< 完整已激活扇叶数量
+        int fans_active_incomplete = 0;       //!< 残缺已激活扇叶数量
+        int fans_inactive = 0;                //!< 未激活扇叶数量
+        int centers = 0;                      //!< 神符中心数量
+        int matched_feature_groups = 0;       //!< 最终匹配特征组数量
+        int final_feature_nodes = 0;          //!< 最终写入特征节点数量
+    };
+
+    /**
+     * @brief 已激活扇叶弱标签样本
+     */
+    struct ActiveFanSample
+    {
+        cv::Point2f center{};                              //!< 扇叶中心
+        cv::Point2f direction{};                           //!< 扇叶方向
+        float width = 0.0f;                                //!< 扇叶宽度
+        float height = 0.0f;                               //!< 扇叶高度
+        std::vector<cv::Point2f> corners;                  //!< 图像缓存中的角点
+        std::vector<cv::Point2f> pnp_points;               //!< PnP 使用的角点
+        std::vector<std::vector<cv::Point>> contour_points; //!< 扇叶轮廓点集
+    };
+
+    bool output_valid = false;                 //!< 当前帧输出是否有效
+    bool used_vanish_update = false;           //!< 当前帧是否使用掉帧预测更新
+    std::string status = "init";               //!< 当前帧识别状态
+    std::string failure_stage;                 //!< 失败阶段
+    std::string find_features_failure;         //!< 特征查找失败原因
+    int binary_nonzero = 0;                    //!< 二值图非零像素数量
+    double binary_nonzero_ratio = 0.0;         //!< 二值图非零像素比例
+    StageTimes stage_times{};                  //!< 阶段耗时
+    CandidateCounts candidate_counts{};        //!< 候选数量
+    std::vector<ActiveFanSample> active_fans{}; //!< 已激活扇叶样本
+};
 
 class RuneDetector : public Detector
 {
@@ -17,6 +84,8 @@ public:
     DEFINE_PROPERTY(Tick, public, protected, (int64_t));
     //! 陀螺仪数据
     DEFINE_PROPERTY(GyroData, public, protected, (GyroData));
+    //! 最近一帧诊断信息
+    DEFINE_PROPERTY_WITH_INIT(LastDiagnostics, public, protected, (RuneDetectorFrameDiagnostics), RuneDetectorFrameDiagnostics{});
 
 public:
     /**
@@ -47,8 +116,9 @@ private:
      * @param[in] center_estimation_info 神符中心的估计位置
      * @param[out] features 找到的所有特征
      * @param[out] matched_features 配对好的特征 (靶心、中心、扇叶),未找出的特征将会用 nullptr 补齐
+     * @param[out] diagnostics 诊断信息输出指针，允许为空
      */
-    static bool findFeatures(cv::Mat src, std::vector<FeatureNode_cptr> &features, std::vector<RuneFeatureCombo> &matched_features);
+    static bool findFeatures(cv::Mat src, std::vector<FeatureNode_cptr> &features, std::vector<RuneFeatureCombo> &matched_features, RuneDetectorFrameDiagnostics *diagnostics = nullptr);
 
     /**
      * @brief 初步获取所有的神符特征

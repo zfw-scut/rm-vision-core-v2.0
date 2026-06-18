@@ -40,9 +40,15 @@ config_path.h
 *srctrl*
 *bin
 .cache
+__pycache__/
+*.pyc
 arms/Hero/ov_models
 gyro.txt
 Doxyfile
+
+# 神符角点网络诊断与弱标注本地生成产物
+/rune_keypoint_nn_runs/
+
 docs/*
 !docs/common/
 !docs/common/**/*.md
